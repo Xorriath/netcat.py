@@ -18,6 +18,7 @@ parser.add_argument("-t", "--target", required=True, type=str, help="Target <IP>
 parser.add_argument("-p", "--port", required=True, type=int, help="Target <port> to connect to or listen on.")
 parser.add_argument("-l", "--listen", required=False, action="store_true", help="Start netcat.py in listener(server) mode,"
                                                                                  "default(no argument) client mode.")
+parser.add_argument("-f","--file", required=False,help="-f <file> to log session to a file")
 args = parser.parse_args()
 
 # Server
@@ -38,9 +39,16 @@ def start_listener(IP, port):
             if not command:
                 continue
             client_socket.send(command.encode())
+            if command.startswith("download "):
+                file_absolute_path = command.split(" ")[1]
+                filename = os.path.basename(file_absolute_path)
+                receive_file(filename, client_socket)
+                continue
             response = receive_all_data(client_socket)
             if response:
                 print(response.decode())
+                if args.file:
+                    log_session(args.file, response.decode(), command)
     except KeyboardInterrupt:
         print("\nUser terminated.")
         client_socket.close()
@@ -60,8 +68,14 @@ def connect_to_listener(IP, port):
         if command_string.startswith("cd "):
             msg = change_directory(command_string)
             client.send(msg.encode())
+        elif command_string.startswith("download "):
+            download(command_string, client)
+        elif command_string.startswith("upload "):
+            upload(command_string, client)
         else:
             output = run_command(command_string).strip()
+            if not output:
+                output = "\n"
             client.send(output.encode())
     client.close()
 
@@ -76,8 +90,7 @@ def receive_all_data(sock):
 
 def run_command(command_string):
     if sys.platform == "linux":
-        command_args = shlex.split(command_string)
-        process = subprocess.Popen(command_args,stdout=subprocess.PIPE, stderr=subprocess.PIPE,text=True,cwd=os.getcwd())
+        process = subprocess.Popen(command_string, shell=True,stdout=subprocess.PIPE, stderr=subprocess.PIPE,text=True,cwd=os.getcwd())
         output = process.stdout.read() + process.stderr.read()
         return output
     elif sys.platform == "win32":
@@ -99,6 +112,48 @@ def change_directory(command_string):
     else:
         msg = "No directory specified"
     return msg
+
+def log_session(filename, output, command):
+    try:
+        with open(filename, "a") as file:
+            file.write(command)
+            file.write("\n")
+            file.write(output)
+            file.write("\n")
+    except Exception as e:
+        print(f"Cannot write to file {filename}: {e}")
+
+def download(command_string, sock):
+    parts = shlex.split(command_string)
+    file_to_download = parts[1]
+    try:
+        with open(file_to_download,"rb") as file:
+            sock.sendall(file.read())
+    except Exception as e:
+        sock.send(b"Error, could not download file.")
+
+def receive_file(file, sock):
+    sock.settimeout(1.0)  # Wait 1 second for more data before assuming it's done
+    with open(file, "wb") as f:
+        try:
+            while True:
+                file_chunk = sock.recv(4096)
+                if file_chunk == b"Error, could not download file.":
+                    print(f"Could not download file: {file}")
+                    return
+                if file_chunk:
+                    f.write(file_chunk)
+                else:
+                    break
+        except socket.timeout:
+            # Expected: no more data coming after timeout
+            pass
+        finally:
+            sock.settimeout(None)  # Restore blocking mode
+        print(f"File received and written to: {file}")
+
+def upload(command_string, sock):
+    pass
 
 def main():
     if args.listen:
